@@ -225,6 +225,12 @@ typedef struct d4_cache_struct {
 	void (*ref)(struct d4_cache_struct *, d4memref);	/* d4ref or custom version */
 
 	/*
+	 * Segmented LRU parameters
+	 */ 
+	 int						isPriorityCache;
+	 struct d4_cache_struct * 	otherCache;
+
+	/*
 	 * Cache policy functions and data:
 	 *	replacement, prefetch, write-alloc, write-back
 	 * These must be set by the user
@@ -402,6 +408,12 @@ extern int	d4setup (void);
 #define		d4ref(c,m) (*(c)->ref)(c,m) /* call customized version */
 #else
 void		d4ref (d4cache *, d4memref); /* call generic version */
+
+/**
+ * Variant d4ref call for segmented caches
+ */ 
+void		d4segmentref (d4cache *, d4memref);
+
 #endif
 void		d4copyback (d4cache *, const d4memref *, int);
 void		d4invalidate (d4cache *, const d4memref *, int);
@@ -409,6 +421,7 @@ void		d4customize (FILE *);
 
 /* replacement policies */
 extern d4stacknode *d4rep_lru (d4cache *, int stacknum, d4memref, d4stacknode *ptr);
+extern d4stacknode *d4rep_slru (d4cache *, int stacknum, d4memref, d4stacknode *ptr);
 extern d4stacknode *d4rep_fifo (d4cache *, int stacknum, d4memref, d4stacknode *ptr);
 extern d4stacknode *d4rep_random (d4cache *, int stacknum, d4memref, d4stacknode *ptr);
 

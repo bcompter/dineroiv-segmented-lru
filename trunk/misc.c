@@ -104,13 +104,15 @@ d4new (d4cache *larger)
 int
 d4setup()
 {
+	//printf("d4setup\n");
+	
 	int i, nnodes;
 	int r = 0;
 	d4cache *c, *cc;
 	d4stacknode *nodes = NULL, *ptr;
 
-	for (c = d4_allcaches;  c != NULL;  c = c->link) {
-
+	for (c = d4_allcaches;  c != NULL;  c = c->link) 
+	{
 		/* Check some stuff the user shouldn't muck with */
 		if (c->stack != NULL || c->pending != NULL ||
 		    c->cacheid < 1 ||
@@ -143,9 +145,12 @@ d4setup()
 					problem |= 0x20;
 				if (d4_cust_vals[c->cacheid][5] != c->prefetch_abortpercent)
 					problem |= 0x40;
-				if (d4_cust_vals[c->cacheid][6] != ((c->replacementf==d4rep_lru)?'l':
+				if (d4_cust_vals[c->cacheid][6] != (
+								(c->replacementf==d4rep_lru)?'l':
+								(c->replacementf==d4rep_slru)?'s':
 							    (c->replacementf==d4rep_fifo)?'f':
-							    (c->replacementf==d4rep_random)?'r':0))
+							    (c->replacementf==d4rep_random)?'r':
+							    0))
 					problem |= 0x80;
 				if (d4_cust_vals[c->cacheid][7] != ((c->prefetchf==d4prefetch_none)?'n':
 							    (c->prefetchf==d4prefetch_always)?'a':
@@ -201,21 +206,28 @@ d4setup()
 					   sizeof(d4stackhead));
 			if (c->stack == NULL)
 				goto fail10;
-			nnodes = c->numsets * (1 + c->assoc) +
-				 (c->numsets * c->assoc + 1) * ((c->flags&D4F_CCC)!=0);
+				
+			nnodes = c->numsets * (1 + c->assoc) + (c->numsets * c->assoc + 1) * ((c->flags&D4F_CCC)!=0);
 			nodes = calloc (nnodes, sizeof(d4stacknode));
+			
+			printf("nnodes in main,         cache %p, nodes %p: %d, %d\n", c, nodes, nnodes, c->numsets);
+			
 			if (nodes == NULL)
 				goto fail11;
+
 			for (i = 0;  i < nnodes;  i++)
 				nodes[i].cachep = c;
 			ptr = nodes;
+
 			/* set up circular list for each stack */
-			for (i = 0;  i < c->numsets+((c->flags&D4F_CCC)!=0);  i++) {
+			for (i = 0;  i < c->numsets+((c->flags&D4F_CCC)!=0);  i++) 
+			{
 				int j, n;
 				n = 1 + c->assoc * ((i < c->numsets) ? 1 : c->numsets);
 				c->stack[i].top = ptr;
 				c->stack[i].n = n;
-				for (j = 1;  j < n-1;  j++) {
+				for (j = 1;  j < n-1;  j++) 
+				{
 					ptr[j].onstack = i;
 					ptr[j].down = &ptr[j+1];
 					ptr[j].up = &ptr[j-1];
@@ -243,7 +255,69 @@ d4setup()
 			sprintf (c->name, "%s%d",
 				 (c->flags&D4F_MEM)!=0 ? "memory" : "cache", c->cacheid);
 		}
-	}
+		
+		if (c->isPriorityCache == 1)
+		{
+			// Also initialize the other cache
+			c->otherCache->numsets = (1<<c->lg2size) / ((1<<c->lg2blocksize) * c->assoc);
+
+			c->otherCache->stack = calloc (c->numsets+((c->flags&D4F_CCC)!=0),
+					   sizeof(d4stackhead));
+			if (c->otherCache->stack == NULL)
+				goto fail10;
+				
+			nnodes = c->otherCache->numsets * (1 + c->assoc) + (c->numsets * c->assoc + 1) * ((c->flags&D4F_CCC)!=0);
+			nodes = calloc (nnodes, sizeof(d4stacknode));
+			
+			//printf("nnodes in probationary, cache %p, nodes %p: %d, %d\n", c->otherCache, nodes, nnodes, c->numsets);
+			
+			if (nodes == NULL)
+				goto fail11;
+
+			for (i = 0;  i < nnodes;  i++)
+				nodes[i].cachep = c;
+			ptr = nodes;
+
+			/* set up circular list for each stack */
+			for (i = 0;  i < c->numsets+((c->flags&D4F_CCC)!=0);  i++) 
+			{
+				int j, n;
+				n = 1 + c->assoc * ((i < c->numsets) ? 1 : c->numsets);
+				c->otherCache->stack[i].top = ptr;
+				c->otherCache->stack[i].n = n;
+				for (j = 1;  j < n-1;  j++) 
+				{
+					ptr[j].onstack = i;
+					ptr[j].down = &ptr[j+1];
+					ptr[j].up = &ptr[j-1];
+				}
+				ptr[0].onstack = i;
+				ptr[0].down = &ptr[1];
+				ptr[0].up = &ptr[n-1];
+				ptr[n-1].onstack = i;
+				ptr[n-1].down = &ptr[0];
+				ptr[n-1].up = &ptr[n-2];
+				ptr += n;
+			}
+			assert (ptr - nodes == nnodes);
+#if D4_HASHSIZE == 0
+			d4stackhash.size += c->numsets * c->assoc;
+#endif
+			d4nnodes += nnodes;
+			
+			/* make a printable name if the user didn't pick one */
+			if (c->otherCache->name == NULL) 
+			{
+				c->otherCache->name = malloc (30);
+				if (c->otherCache->name == NULL)
+					goto fail12;
+				sprintf (c->otherCache->name, "%s%d",
+					 (c->flags&D4F_MEM)!=0 ? "memory" : "cache", c->cacheid);
+			}
+		}
+	
+	}  // end foreach cache
+	
 #if D4_HASHSIZE > 0
 	d4stackhash.size = D4_HASHSIZE;
 #endif
@@ -291,6 +365,13 @@ d4init_rep_lru (d4cache *c)
 {
 	c->replacementf = d4rep_lru;
 	c->name_replacement = "LRU";
+}
+
+void
+d4init_rep_slru (d4cache *c)
+{
+	c->replacementf = d4rep_slru;
+	c->name_replacement = "SLRU";
 }
 
 void
@@ -469,9 +550,12 @@ d4checkstack (d4cache *c, int stacknum, char *msg)
 d4stacknode *
 d4_find (d4cache *c, int stacknum, d4addr blockaddr)
 {
+	//printf("**** d4_find, looking for block addr %d in stacknum %d\n", blockaddr, stacknum);
+	
 	d4stacknode *ptr;
 
-	if (c->stack[stacknum].n > D4HASH_THRESH) {
+	if (c->stack[stacknum].n > D4HASH_THRESH) 
+	{
 		int buck = D4HASH (blockaddr, stacknum, c->cacheid);
 		for (ptr = d4stackhash.table[buck];
 		     ptr!=NULL && (ptr->blockaddr!=blockaddr || ptr->cachep!=c || ptr->onstack != stacknum);
@@ -523,13 +607,17 @@ d4findnth (d4cache *c, int stacknum, int n)
 void
 d4movetotop (d4cache *c, int stacknum, d4stacknode *ptr)
 {
+	//printf("d4movetotop\n");
 	d4stacknode *top = c->stack[stacknum].top;
 	d4stacknode *bot;
 
 	/* nothing to do if node is already at top */
-	if (ptr != top) {
+	if (ptr != top) 
+	{
 		bot = top->up;
-		if (bot != ptr)	{	/* general case */
+		
+		if (bot != ptr)	
+		{	/* general case */
 			ptr->down->up = ptr->up;	/* remove */
 			ptr->up->down = ptr->down;
 			ptr->up = bot;			/* insert between top & bot */
@@ -546,6 +634,7 @@ d4movetotop (d4cache *c, int stacknum, d4stacknode *ptr)
 void
 d4movetobot (d4cache *c, int stacknum, d4stacknode *ptr)
 {
+	//printf("d4movetobottom\n");
 	d4stacknode *top = c->stack[stacknum].top;
 	d4stacknode *bot = top->up;
 
@@ -569,6 +658,8 @@ d4movetobot (d4cache *c, int stacknum, d4stacknode *ptr)
 void
 d4hash (d4cache *c, int stacknum, d4stacknode *s)
 {
+	//printf("d4hash called for address %d\n", s->blockaddr);
+	
 	int buck = D4HASH (s->blockaddr, stacknum, s->cachep->cacheid);
 
 	assert (c->stack[stacknum].n > D4HASH_THRESH);
@@ -581,6 +672,8 @@ d4hash (d4cache *c, int stacknum, d4stacknode *s)
 void
 d4_unhash (d4cache *c, int stacknum, d4stacknode *s)
 {
+	//printf("d4unhash called for address %d\n", s->blockaddr);
+	
 	int buck = D4HASH (s->blockaddr, stacknum, c->cacheid);
 	d4stacknode *p = d4stackhash.table[buck];
 
@@ -975,6 +1068,12 @@ d4customize (FILE *f)
 				    "#define D4_POLICY_%d_rep 'l'\n"
 				    "#undef d4rep_lru\n"
 				    "#define d4rep_lru d4_%dreplacement\n",
+				    cid, cid, cid);
+		else if (c->replacementf == d4rep_slru)
+			fprintf (f, "#define D4_OPTS_%d_rep_slru 1\n"
+				    "#define D4_POLICY_%d_rep 'l'\n"
+				    "#undef d4rep_slru\n"
+				    "#define d4rep_slru d4_%dreplacement\n",
 				    cid, cid, cid);
 		else if (c->replacementf == d4rep_fifo)
 			fprintf (f, "#define D4_OPTS_%d_rep_fifo 1\n"

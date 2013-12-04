@@ -426,6 +426,7 @@ verify_options()
 		for (idu = 0;  idu < 3;  idu++) {
 			if (level_replacement[idu][lev]!=0 &&
 			    level_replacement[idu][lev]!='l' &&	/* LRU */
+			    level_replacement[idu][lev]!='s' &&	/* Segmented LRU */
 			    level_replacement[idu][lev]!='f' &&	/* FIFO */
 			    level_replacement[idu][lev]!='r')	/* random */
 				shorthelp ("level %d %ccache replacement policy unrecognized\n",
@@ -585,6 +586,8 @@ verify_options()
 void
 init_1cache (d4cache *c, int lev, int idu)
 {
+	//printf("init_1cache on %p: %d, %d\n", c, lev, idu);
+	
 	c->name = malloc (30);
 	if (c->name == NULL)
 		die ("malloc failure initializing l%d%ccache\n", lev+1, idu==0?'u':(idu==1?'i':'d'));
@@ -595,12 +598,26 @@ init_1cache (d4cache *c, int lev, int idu)
 		c->flags |= D4F_RO;
 	c->lg2blocksize = clog2 (level_blocksize[idu][lev]);
 	c->lg2subblocksize = clog2 (level_subblocksize[idu][lev]);
-	c->lg2size = clog2 (level_size[idu][lev]);
+	
+	// Size may be impacted by the use of segmented LRU
+	// If so, then the size of each sub-cache is 1/2 the total size
+	if (level_replacement[idu][lev] == 's')
+	{
+		//printf("Setting size %d\n", level_size[idu][lev] / 2);
+		c->lg2size = clog2 (level_size[idu][lev] / 2);
+	}
+	else
+	{
+		//printf("Setting size %d\n", level_size[idu][lev]);
+		c->lg2size = clog2 (level_size[idu][lev]);
+	}
+	
 	c->assoc = level_assoc[idu][lev];
 
 	switch (level_replacement[idu][lev]) {
 	default:  die ("replacement policy '%c' initialization botch\n", level_replacement[idu][lev]);
 	case 'l': c->replacementf = d4rep_lru; c->name_replacement = "LRU"; break;
+	case 's': c->replacementf = d4rep_slru; c->name_replacement = "SLRU"; break;
 	case 'f': c->replacementf = d4rep_fifo; c->name_replacement = "FIFO"; break;
 	case 'r': c->replacementf = d4rep_random; c->name_replacement = "random"; break;
 	}
