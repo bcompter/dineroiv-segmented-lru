@@ -117,6 +117,8 @@ static void d4dummy_crash (char *name)
 	}
 d4stacknode *d4rep_lru (d4cache *c, int stacknum, d4memref m, d4stacknode *ptr)
 	{ d4dummy_crash("d4rep_lru"); return NULL; }
+d4stacknode *d4rep_slru (d4cache *c, int stacknum, d4memref m, d4stacknode *ptr)
+	{ d4dummy_crash("d4rep_slru"); return NULL; }
 d4stacknode *d4rep_fifo (d4cache *c, int stacknum, d4memref m, d4stacknode *ptr)
 	{ d4dummy_crash("d4rep_fifo"); return NULL; }
 d4stacknode *d4rep_random (d4cache *c, int stacknum, d4memref m, d4stacknode *ptr)
@@ -212,6 +214,55 @@ d4rep_lru (d4cache *c, int stacknum, d4memref m, d4stacknode *ptr)
 }
 #endif	/* !D4CUSTOM || D4_OPT (rep_lru) */
 
+#if !D4CUSTOM || D4_OPT (rep_slru)
+/*
+ * SLRU replacement policy
+ * With D4CUSTOM!=0 and inlining, this is also good for direct-mapped caches
+ * 
+ * This is a direct copy of lru for now to get things rolling
+ * Todo, replace with the real code...
+ * 
+ * Need to figure out how this baby ticks...
+ */
+D4_INLINE
+d4stacknode *
+d4rep_slru (d4cache *c, int stacknum, d4memref m, d4stacknode *ptr)
+{
+	//printf("***** d4rep_slru for cache %d memory address %d\n", stacknum, m.address);
+	
+	if (ptr != NULL) 
+	{	
+		//printf("-------- ptr != NULL\n");
+		/**
+		 * On a hit we treat the result the same as normal LRU by moving 
+		 * the current node to the top of the stack and thus the top of
+		 * the priority cache.
+		 */ 
+		if ((!D4CUSTOM || D4VAL (c, assoc) > 1 || (D4VAL (c, flags) & D4F_CCC) != 0) && ptr != c->stack[stacknum].top)
+		{
+			d4movetotop (c, stacknum, ptr);
+		}
+	}
+	else 
+	{			
+		//printf("-------- ptr == NULL\n");
+		/**
+		 * Misses is where things get interesting.
+		 */ 
+		ptr = c->stack[stacknum].top->up;
+		assert (ptr->valid == 0);
+		//printf("--- bottom previous block addr is %d, valid bit is %d\n", ptr->blockaddr, ptr->valid);
+		ptr->blockaddr = D4ADDR2BLOCK (c, m.address);
+		//printf("--- bottom   new    block addr is %d, valid bit is %d\n", ptr->blockaddr, ptr->valid);
+		if ((!D4CUSTOM || D4VAL(c,assoc) >= D4HASH_THRESH || (D4VAL(c,flags)&D4F_CCC)!=0) && c->stack[stacknum].n > D4HASH_THRESH)
+		{
+			d4hash (c, stacknum, ptr);
+		}
+		c->stack[stacknum].top = ptr;	/* quicker than d4movetotop */
+	}
+	return ptr;
+}
+#endif	/* !D4CUSTOM || D4_OPT (rep_slru) */
 
 #if !D4CUSTOM || D4_OPT (rep_fifo)
 /*
@@ -610,82 +661,107 @@ d4_splitm (d4cache *c, d4memref mr, d4addr ba)
 void
 d4ref (d4cache *c, d4memref mr)
 {
+	//printf("*** d4ref for main cache %p, probationary cache %p: memory addr %d\n", c, c->otherCache, mr.address);
+	
     /* special cases first */
     if ((D4VAL (c, flags) & D4F_MEM) != 0) /* Special case for simulated memory */
-	c->fetch[(int)mr.accesstype]++;
-    else if (mr.accesstype == D4XCOPYB || mr.accesstype == D4XINVAL) {
-	d4memref m = mr;	/* dumb compilers might de-optimize if we take addr of mr */
-	if (m.accesstype == D4XCOPYB)
-		d4copyback (c, &m, 1);
-	else
-		d4invalidate (c, &m, 1);
+		c->fetch[(int)mr.accesstype]++;
+    else if (mr.accesstype == D4XCOPYB || mr.accesstype == D4XINVAL) 
+    {
+		//printf("Calling copyback or invalidate\n");
+		d4memref m = mr;	/* dumb compilers might de-optimize if we take addr of mr */
+		if (m.accesstype == D4XCOPYB)
+			d4copyback (c, &m, 1);
+		else
+			d4invalidate (c, &m, 1);
     }
-    else {				 /* Everything else */
-	const d4addr blockaddr = D4ADDR2BLOCK (c, mr.address);
-	const d4memref m = d4_splitm (c, mr, blockaddr);
-	const int atype = D4BASIC_ATYPE (m.accesstype);
-	const int setnumber = D4ADDR2SET (c, m.address);
-	const int ronly = D4CUSTOM && (D4VAL (c, flags) & D4F_RO) != 0; /* conservative */
-	const int walloc = !ronly && atype == D4XWRITE && D4VAL (c, wallocf) (c, m);
-	const int sbbits = D4ADDR2SBMASK (c, m);
-	int miss, blockmiss, wback;
-	d4stacknode *ptr;
+    else 
+    {				 /* Everything else */
+		const d4addr blockaddr = D4ADDR2BLOCK (c, mr.address);
+		const d4memref m = d4_splitm (c, mr, blockaddr);
+		const int atype = D4BASIC_ATYPE (m.accesstype);
+		const int setnumber = D4ADDR2SET (c, m.address);
+		const int ronly = D4CUSTOM && (D4VAL (c, flags) & D4F_RO) != 0; /* conservative */
+		const int walloc = !ronly && atype == D4XWRITE && D4VAL (c, wallocf) (c, m);
+		const int sbbits = D4ADDR2SBMASK (c, m);
+		int miss, blockmiss, wback;
+		d4stacknode *ptr;
 
-	if ((D4VAL (c, flags) & D4F_RO) != 0 && atype == D4XWRITE) {
-		fprintf (stderr, "Dinero IV: write to read-only cache %d (%s)\n",
-			 c->cacheid, c->name);
-		exit (9);
-	}
+		if ((D4VAL (c, flags) & D4F_RO) != 0 && atype == D4XWRITE) 
+		{
+			fprintf (stderr, "Dinero IV: write to read-only cache %d (%s)\n",
+				 c->cacheid, c->name);
+			exit (9);
+		}
 
-	/*
-	 * Find address in the cache.
-	 * Quickly check for top of stack.
-	 */
-	ptr = c->stack[setnumber].top;
-	if (ptr->blockaddr == blockaddr && ptr->valid != 0)
-		; /* found it */
-	else if (!D4CUSTOM || D4VAL (c, assoc) > 1)
-		ptr = d4_find (c, setnumber, blockaddr);
-	else
-		ptr = NULL;
+		/*
+		 * Find address in the cache.
+		 * Quickly check for top of stack.
+		 */		 
+		ptr = c->stack[setnumber].top;
+		if (ptr->blockaddr == blockaddr && ptr->valid != 0)
+			; /* found it */
+		else if (!D4CUSTOM || D4VAL (c, assoc) > 1)
+			ptr = d4_find (c, setnumber, blockaddr);
+		else
+			ptr = NULL;
 
-	blockmiss = (ptr == NULL);
-	miss = blockmiss || (sbbits & ptr->valid) != sbbits;
+		blockmiss = (ptr == NULL);
+		
+		miss = blockmiss || (sbbits & ptr->valid) != sbbits;
+		
+		if (miss)
+		{
+			//printf("MISS! %d %d\n", miss, blockmiss);
+		}
+		else
+		{
+			//printf("HIT!\n");
+		}
 
-	/*
-	 * Prefetch on reads and instruction fetches, but not on
-	 * writes, misc, and prefetch references.
-	 * Optionally, some percentage may be thrown away.
-	 */
-	if ((!D4CUSTOM || !D4_OPT (prefetch_none)) &&
-	    (m.accesstype == D4XREAD || m.accesstype == D4XINSTRN)) {
-		d4pendstack *pf = D4VAL (c, prefetchf) (c, m, miss, ptr);
-		if (pf != NULL) {
-			/* Note: 0 <= random() <= 2^31-1 and 0 <= random()/(INT_MAX/100) < 100. */
-			if (D4VAL (c, prefetch_abortpercent) > 0 &&
-			    random()/(INT_MAX/100) < D4VAL (c, prefetch_abortpercent))
-				d4put_mref (pf);	/* throw it away */
-			else {
-				pf->next = c->pending;	/* add to pending list */
-				c->pending = pf;
+
+		/*
+		 * Prefetch on reads and instruction fetches, but not on
+		 * writes, misc, and prefetch references.
+		 * Optionally, some percentage may be thrown away.
+		 */
+		if ((!D4CUSTOM || !D4_OPT (prefetch_none)) &&
+			(m.accesstype == D4XREAD || m.accesstype == D4XINSTRN)) 
+		{
+			d4pendstack *pf = D4VAL (c, prefetchf) (c, m, miss, ptr);
+			if (pf != NULL) 
+			{
+				/* Note: 0 <= random() <= 2^31-1 and 0 <= random()/(INT_MAX/100) < 100. */
+				if (D4VAL (c, prefetch_abortpercent) > 0 &&
+					random()/(INT_MAX/100) < D4VAL (c, prefetch_abortpercent))
+					d4put_mref (pf);	/* throw it away */
+				else 
+				{
+					pf->next = c->pending;	/* add to pending list */
+					c->pending = pf;
+				}
 			}
 		}
-	}
 
 	/*
 	 * Update the cache
 	 * Don't do it for non-write-allocate misses
 	 */
 	wback = 0;
-	if (ronly || atype != D4XWRITE || !blockmiss || walloc) {
+	if (ronly || atype != D4XWRITE || !blockmiss || walloc) 
+	{
 		/*
 		 * Adjust priority stack as necessary
+		 * 
+		 * REPLACEMENT POLICY IS CALLED HERE!
 		 */
 		ptr = D4VAL (c, replacementf) (c, setnumber, m, ptr);
+		
 		/*
 		 * Update state bits
 		 */
-		if (blockmiss) {
+		if (blockmiss) 
+		{
 			assert (ptr->valid == 0);
 			ptr->referenced = 0;
 			ptr->dirty = 0;
@@ -708,9 +784,23 @@ d4ref (d4cache *c, d4memref mr)
 		 * Take care of replaced block
 		 * including write-back if necessary
 		 */
-		if (blockmiss) {
+		if (blockmiss) 
+		{
+			//printf("blockmiss\n");
 			d4stacknode *rptr = c->stack[setnumber].top->up;
-			if (rptr->valid != 0) {
+			if (rptr->valid != 0) 
+			{
+				if (c->otherCache != NULL)
+				{
+					// We have a segmented cache
+					// Call a dref on the probationary cache for the block being replaced
+					d4memref newmr;
+					newmr.address = rptr->blockaddr;
+					newmr.accesstype = mr.accesstype;
+					newmr.size = mr.size;
+					d4ref(c->otherCache, newmr);
+				}
+				//printf("rptr->valid != 0, address is %d, other cache is %p\n", rptr->blockaddr, c->otherCache);
 				if (!ronly && (rptr->valid & rptr->dirty) != 0)
 					d4_wbblock (c, rptr, D4VAL (c, lg2subblocksize));
 				if (c->stack[setnumber].n > D4HASH_THRESH)
@@ -718,7 +808,7 @@ d4ref (d4cache *c, d4memref mr)
 				rptr->valid = 0;
 			}
 		}
-	}
+	}  // end if (ronly || atype != D4XWRITE || !blockmiss || walloc) 
 
 	/*
 	 * Prepare reference for downstream cache.
@@ -728,14 +818,16 @@ d4ref (d4cache *c, d4memref mr)
 	 * In some cases, a write can generate two downstream references:
 	 * a fetch to load the complete subblock and a write-through store.
 	 */
-	if (!ronly && atype == D4XWRITE && !wback) {
+	if (!ronly && atype == D4XWRITE && !wback) 
+	{
 		d4pendstack *newm = d4get_mref();
 		newm->m = m; 
 		newm->next = c->pending;
 		c->pending = newm;
 	}
 	if (miss && (ronly || atype != D4XWRITE ||
-		     (walloc && m.size != D4REFNSB (c, m) << D4VAL (c, lg2subblocksize)))) {
+		     (walloc && m.size != D4REFNSB (c, m) << D4VAL (c, lg2subblocksize)))) 
+	{
 		d4pendstack *newm = d4get_mref();
 		/* note, we drop prefetch attribute */
 		newm->m.accesstype = (atype == D4XWRITE) ? D4XREAD : atype;
@@ -752,7 +844,8 @@ d4ref (d4cache *c, d4memref mr)
 	 * simulation.
 	 */
 	if ((D4CUSTOM && D4_OPT (ccc)) ||
-	    (!D4CUSTOM && (c->flags & D4F_CCC) != 0)) {
+	    (!D4CUSTOM && (c->flags & D4F_CCC) != 0)) 
+	{
 					/* set to use for fully assoc cache */
 		const int fullset = D4VAL(c,numsets);
 					/* number of blocks in fully assoc cache */
@@ -768,7 +861,9 @@ d4ref (d4cache *c, d4memref mr)
 		fullmiss = fullblockmiss || (sbbits & ptr->valid) != sbbits;
 
 		/* take care of stack update */
-		if (ronly || atype != D4XWRITE || !fullblockmiss || walloc) {
+		if (ronly || atype != D4XWRITE || !fullblockmiss || walloc) 
+		{
+			//printf("  stack update\n");
 			ptr = D4VAL (c, replacementf) (c, fullset, m, ptr);
 			assert (!fullblockmiss || ptr->valid == 0);
 			ptr->valid |= sbbits;
@@ -798,6 +893,9 @@ d4ref (d4cache *c, d4memref mr)
 
 		/* take care of replaced block */
 		if (fullblockmiss) {
+			
+			//printf("* Full block miss!\n");
+			
 			d4stacknode *rptr = c->stack[fullset].top->up;
 			if (rptr->valid != 0) {
 				if (c->stack[fullset].n > D4HASH_THRESH)
@@ -808,15 +906,19 @@ d4ref (d4cache *c, d4memref mr)
 	}
 
 	/*
-	 * Update non-ccc metrics. 
+	 * Update non-ccc metrics for non-segmented caches
 	 */
-	c->fetch[(int)m.accesstype]++;
-	if (miss) {
-		c->miss[(int)m.accesstype]++;
-		if (blockmiss)
-			c->blockmiss[(int)m.accesstype]++;
+	 if (c->otherCache == NULL)
+	 {
+		  //printf("*********** UPDATING STATS NON-SEGMENTED\n");
+		c->fetch[(int)m.accesstype]++;
+		if (miss) 
+		{
+			c->miss[(int)m.accesstype]++;
+			if (blockmiss)
+				c->blockmiss[(int)m.accesstype]++;
+		}
 	}
-
 	/*
 	 * Now make recursive calls for pending references
 	 */
@@ -824,6 +926,108 @@ d4ref (d4cache *c, d4memref mr)
 		d4_dopending (c, c->pending);
     }
 }
+
+/*
+ * Handle a memory reference for the given segmented cache.
+ * The user calls this function for the cache closest to
+ * the processor; other caches are handled automatically.
+ */
+void
+d4segmentref (d4cache *c, d4memref mr)
+{
+	//printf("*** d4segmentref for main cache %p, probationary cache %p: memory addr %d\n", c, c->otherCache, mr.address);
+	
+    /* special cases first */
+    if ((D4VAL (c, flags) & D4F_MEM) != 0) /* Special case for simulated memory */
+		c->fetch[(int)mr.accesstype]++;
+    else if (mr.accesstype == D4XCOPYB || mr.accesstype == D4XINVAL) 
+    {
+		//printf("Calling copyback or invalidate\n");
+		d4memref m = mr;	/* dumb compilers might de-optimize if we take addr of mr */
+		if (m.accesstype == D4XCOPYB)
+			d4copyback (c, &m, 1);
+		else
+			d4invalidate (c, &m, 1);
+    }
+    else 
+    {				 /* Everything else */
+		const d4addr blockaddr = D4ADDR2BLOCK (c, mr.address);
+		const d4memref m = d4_splitm (c, mr, blockaddr);
+		const int atype = D4BASIC_ATYPE (m.accesstype);
+		const int setnumber = D4ADDR2SET (c, m.address);
+		const int ronly = D4CUSTOM && (D4VAL (c, flags) & D4F_RO) != 0; /* conservative */
+		const int walloc = !ronly && atype == D4XWRITE && D4VAL (c, wallocf) (c, m);
+		const int sbbits = D4ADDR2SBMASK (c, m);
+		int miss, blockmiss, wback;
+		int missProbationary, blockmissProbationary;
+		d4stacknode * ptr;
+		d4stacknode * ptrProbationary;
+
+		if ((D4VAL (c, flags) & D4F_RO) != 0 && atype == D4XWRITE) 
+		{
+			fprintf (stderr, "Dinero IV: write to read-only cache %d (%s)\n",
+				 c->cacheid, c->name);
+			exit (9);
+		}
+
+		/*
+		 * Find address in the cache.
+		 * Quickly check for top of stack.
+		 */		 
+		ptr = c->stack[setnumber].top;
+		if (ptr->blockaddr == blockaddr && ptr->valid != 0)
+			; /* found it */
+		else if (!D4CUSTOM || D4VAL (c, assoc) > 1)
+			ptr = d4_find (c, setnumber, blockaddr);
+		else
+			ptr = NULL;
+			
+		/*
+		 * Find address in the cache.
+		 * Quickly check for top of stack.
+		 */		 
+		ptrProbationary = c->otherCache->stack[setnumber].top;
+		if (ptrProbationary->blockaddr == blockaddr && ptrProbationary->valid != 0)
+			; /* found it */
+		else if (!D4CUSTOM || D4VAL (c, assoc) > 1)
+		{
+			ptrProbationary = d4_find (c->otherCache, setnumber, blockaddr);
+		}
+		else
+			ptrProbationary = NULL;
+
+		blockmiss = (ptr == NULL);
+		blockmissProbationary = (ptrProbationary == NULL);
+		
+		miss = blockmiss || (sbbits & ptr->valid) != sbbits;
+		missProbationary = blockmissProbationary || (sbbits & ptrProbationary->valid) != sbbits;
+		
+		if (miss && missProbationary)
+		{
+			//printf("Block not found in either cache, calling d4ref on probationary cache!\n");
+			d4ref(c->otherCache, mr);
+		}
+		else
+		{
+			//printf("Block HIT, calling d4ref on priority cache!\n");
+			d4ref(c, mr);
+		}
+		
+		/*
+		 * Update non-ccc metrics. 
+		 */
+		 //printf("*********** UPDATING STATS\n");
+		c->fetch[(int)m.accesstype]++;
+		if (miss && missProbationary) 
+		{
+			c->miss[(int)m.accesstype]++;
+			if (blockmiss)
+				c->blockmiss[(int)m.accesstype]++;
+		}
+		
+		return;
+	}
+}  // end d4segmentref
 
 #endif /* !D4CUSTOM || D4_REF_ONCE>1 */
 #undef D4_REF_ONCE

@@ -1752,34 +1752,99 @@ next_trace_item()
 void
 initialize_caches (d4cache **icachep, d4cache **dcachep)
 {
+	printf("Initialize_caches\n");
+	
 	static char memname[] = "memory";
 	int i, lev, idu;
 	d4cache	*c = NULL,	/* avoid `may be used uninitialized' warning in gcc */
 		*ci,
 		*cd;
+		
+	// Segmented LRU cache 
+	d4cache * ciProbationary;
+	d4cache * cdProbationary;
 
-	mem = cd = ci = d4new(NULL);
+	mem = cd = ci = ciProbationary = cdProbationary = d4new(NULL);
+	
 	if (ci == NULL)
 		die ("cannot create simulated memory\n");
+		
 	ci->name = memname;
 
-	for (lev = maxlevel-1;  lev >= 0;  lev--) {
-		for (idu = 0;  idu < 3;  idu++) {
-			if (level_size[idu][lev] != 0) {
-				switch (idu) {
-				case 0:	cd = ci = c = d4new (ci); break;	/* u */
-				case 1:	     ci = c = d4new (ci); break;	/* i */
-				case 2:	     cd = c = d4new (cd); break;	/* d */
+	for (lev = maxlevel-1;  lev >= 0;  lev--) 
+	{
+		for (idu = 0;  idu < 3;  idu++) 
+		{
+			if (level_size[idu][lev] != 0) 
+			{
+				switch (idu) 
+				{
+				case 0:	
+					cd = ci = c = d4new (ci);
+					break;	/* u */
+				case 1:	     
+					ci = c = d4new (ci);
+					break;	/* i */
+				case 2:	     
+					cd = c = d4new (cd);
+					break;	/* d */
 				}
 				if (c == NULL)
 					die ("cannot create level %d %ccache\n",
 					     lev+1, idu==0?'u':(idu==1?'i':'d'));
+					     
+				printf("Initializing main cache %p: %d, %d\n", c, lev, idu);
 				init_1cache (c, lev, idu);
+				if (c->replacementf == d4rep_slru)
+				{
+					// Set this first cache to the priority cache
+					c->isPriorityCache = 1;
+					
+					// Also init the probationary cache for segmented LRU
+					switch (idu) 
+					{
+					case 0:	
+						ciProbationary = d4new(ciProbationary);
+						printf("Initializing probationary cache %p: %d, %d\n", ciProbationary, lev, idu);
+						init_1cache (ciProbationary, lev, idu);
+						break;	/* u */
+					case 1:
+						ciProbationary = d4new(ciProbationary);
+						printf("Initializing probationary cache %p: %d, %d\n", ciProbationary, lev, idu);
+						init_1cache (ciProbationary, lev, idu);
+						break;	/* i */
+					case 2:	     
+						ciProbationary = d4new(cdProbationary);
+						printf("Initializing probationary cache %p: %d, %d\n", cdProbationary, lev, idu);
+						init_1cache (cdProbationary, lev, idu);
+						break;	/* d */
+					}
+				}
+				// Set our cache to some global variable
 				levcache[idu][lev] = c;
+				if (c->replacementf == d4rep_slru && c->isPriorityCache == 1)
+				{
+					printf("initialize_caches probationary cache\n");
+					// Set our probationary cache
+					switch (idu) 
+					{
+					case 0:	
+						levcache[idu][lev]->otherCache = ciProbationary;
+						break;	/* u */
+					case 1:	     
+						levcache[idu][lev]->otherCache = ciProbationary;
+						break;	/* i */
+					case 2:	     
+						levcache[idu][lev]->otherCache = cdProbationary;
+						break;	/* d */
+					}
+					levcache[idu][lev]->otherCache->isPriorityCache = 0;
+				}
 			}
 		}
 	}
 	i = d4setup();
+
 	if (i != 0)
 		die ("cannot complete cache initializations; d4setup = %d\n", i);
 	*icachep = ci;
@@ -1935,22 +2000,30 @@ main (int argc, char **argv)
 	double tmaxcount = 0, tintcount;
 	double flcount;
 
-	if (argc > 0) {
+	if (argc > 0) 
+	{
 		char *cp;
 		progname = argv[0];
-		while ((cp = strrchr (progname, '/')) != NULL) {
+		while ((cp = strrchr (progname, '/')) != NULL) 
+		{
 			if (cp[1] == 0)
 				cp[0] = 0;	/* trim trailing '/' */
 			else
 				progname = cp+1;
 		}
 	}
-
+	
 	doargs (argc, argv);
 	verify_options();
+	
+	/**
+	 * Initialize caches!
+	 */ 
 	initialize_caches (&ci, &cd);
+	
 #if !D4CUSTOM
-	if (customname != NULL) {
+	if (customname != NULL) 
+	{
 		customize_caches();
 		/* never returns */
 	}
@@ -1964,32 +2037,60 @@ main (int argc, char **argv)
 	printf ("---All rights reserved.\n");
 	printf ("---Copyright (C) 1985, 1989 Mark D. Hill.  All rights reserved.\n");
 	printf ("---See -copyright option for details\n");
+	printf ("---\n");
+	printf ("---Modified by Brian Compter, 2013 to support Segmented LRU replacement policy.\n");
 
 	summarize_caches (ci, cd);
+
+	printf("\n\nNumber of sets is %d\n", ci->numsets);
+	printf("Size of stack is %d\n", ci->stack->n);
 
 	printf ("\n---Simulation begins.\n");
 	tintcount = stat_interval;
 	flcount = flushcount;
-	while (1) {
+	while (1) 
+	{
 		r = next_trace_item();
+		
+		//printf("* Executing trace %d\n", r.address);
+
 		if (r.accesstype == D4TRACE_END)
 			goto done;
-		if (maxcount != 0 && tmaxcount >= maxcount) {
+		if (maxcount != 0 && tmaxcount >= maxcount) 
+		{
 			printf ("---Maximum address count exceeded.\n");
 			break;
 		}
-		switch (r.accesstype) {
-		case D4XINSTRN:	  d4ref (ci, r);  break;
-		case D4XINVAL:	  d4ref (ci, r);  /* fall through */
-		default:	  d4ref (cd, r);  break;
+		switch (r.accesstype) 
+		{
+			case D4XINSTRN:
+				if (ci->isPriorityCache)
+					d4segmentref (ci, r); 
+				else
+					d4ref (ci, r);  
+				break;
+			case D4XINVAL:	  
+				if (ci->isPriorityCache)
+					d4segmentref (ci, r); 
+				else
+					d4ref (ci, r);
+			default:	  	  
+				if (cd->isPriorityCache)
+					d4segmentref (cd, r); 
+				else
+					d4ref (cd, r);
+				break;
 		}
 		tmaxcount += 1;
-		if (tintcount > 0 && (tintcount -= 1) <= 0) {
+		if (tintcount > 0 && (tintcount -= 1) <= 0) 
+		{
 			dostats();
 			tintcount = stat_interval;
 		}
-		if (flcount > 0 && (flcount -= 1) <= 0) {
+		if (flcount > 0 && (flcount -= 1) <= 0) 
+		{
 			/* flush cache = copy back and invalidate */
+			printf("***** Flush cache\n");
 			r.accesstype = D4XCOPYB;
 			r.address = 0;
 			r.size = 0;
@@ -2000,7 +2101,36 @@ main (int argc, char **argv)
 				d4ref (cd, r);
 			flcount = flushcount;
 		}
-	}
+		
+		// Print out cache info to debug
+		/*
+		d4stacknode * nodePtr;
+		int ptrIndex;
+		
+		nodePtr = ci->stack[0].top;
+		ptrIndex = 0;
+		printf("PRIORITY CACHE\n");
+		printf("             Ptr       Block Addr  Valid    Ref'd     Dirty    OnStack\n");
+		for (ptrIndex = 0; ptrIndex < ci->numsets; ptrIndex++)
+		{	
+			printf("=> %8d: %p, %8d, %8d, %8d, %8d, %8d\n", ptrIndex, nodePtr, nodePtr->blockaddr, nodePtr->valid, nodePtr->referenced, nodePtr->dirty, nodePtr->onstack);
+			nodePtr = ci->stack[ptrIndex+1].top;
+		}
+		
+		if (ci->otherCache != NULL)
+		{
+			nodePtr = ci->otherCache->stack[0].top;
+			ptrIndex = 0;
+			printf("PROBATIONARY CACHE\n");
+			printf("             Ptr       Block Addr  Valid    Ref'd     Dirty    OnStack\n");
+			for (ptrIndex = 0; ptrIndex < ci->numsets; ptrIndex++)
+			{	
+				printf("=> %8d: %p, %8d, %8d, %8d, %8d, %8d\n", ptrIndex, nodePtr, nodePtr->blockaddr, nodePtr->valid, nodePtr->referenced, nodePtr->dirty, nodePtr->onstack);
+				nodePtr = ci->otherCache->stack[ptrIndex+1].top;
+			}
+		}
+		* */
+	}  // end while
 done:
 	/* copy everything back at the end -- is this really a good idea? XXX */
 	r.accesstype = D4XCOPYB;
